@@ -102,11 +102,14 @@ func getMethodsMap(in map[string]protoService) map[string]interface{} {
 }
 
 func main() {
+
 	in, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		logrus.Errorf("%v", err)
 		return
 	}
+
+	logrus.Errorf(string(in))
 
 	req := &pluginpb.CodeGeneratorRequest{}
 	if err = proto.Unmarshal(in, req); err != nil {

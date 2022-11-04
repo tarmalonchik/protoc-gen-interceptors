@@ -114,8 +114,17 @@ func main() {
 		return
 	}
 
-	logrus.Errorf("success")
 	logrus.Println(req.FileToGenerate)
+
+	for i := range req.ProtoFile {
+		fmt.Println(req.ProtoFile[i].Service)
+	}
+
+	for i := range req.ProtoFile {
+		for j := range req.ProtoFile[i].Service {
+			fmt.Println(req.ProtoFile[i].Service[j].Name)
+		}
+	}
 
 	//input, _ := ioutil.ReadAll(os.Stdin)
 	//var req pluginpb.CodeGeneratorRequest

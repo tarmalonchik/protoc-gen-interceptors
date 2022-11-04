@@ -1,9 +1,8 @@
 version: v1
-name: buf.build/Alan-prog/protoc-gen-interceptors
+name: buf.build/tarmalonchik/protoc-gen-interceptors
 deps:
   -  buf.build/googleapis/googleapis
-
+  -  buf.build/srikrsna/protoc-gen-gotag
 breaking:
   use:
     - FILE
-

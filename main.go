@@ -2,21 +2,19 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/printer"
 	"go/token"
-	"io"
 	"io/ioutil"
-	"os"
 	"regexp"
 	"strings"
 
 	"github.com/sirupsen/logrus"
 	"golang.org/x/tools/go/ast/astutil"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/pluginpb"
+	"google.golang.org/protobuf/compiler/protogen"
 )
 
 const (
@@ -102,27 +100,20 @@ func getMethodsMap(in map[string]protoService) map[string]interface{} {
 }
 
 func main() {
-	in, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		logrus.Errorf("%v", err)
-		return
-	}
+	protogen.Options{
+		ParamFunc: flag.CommandLine.Set,
+	}.Run(func(gen *protogen.Plugin) error {
+		fmt.Println(gen.Files)
+		return nil
+	})
 
-	req := &pluginpb.CodeGeneratorRequest{}
-	if err = proto.Unmarshal(in, req); err != nil {
-		logrus.Errorf("%v", err)
-		return
-	}
+	//req := &pluginpb.CodeGeneratorRequest{}
+	//if err = proto.Unmarshal(in, req); err != nil {
+	//	logrus.Errorf("%v", err)
+	//	return
+	//}
 
 	logrus.Println("success parsing")
-	logrus.Println(req.FileToGenerate)
-	//logrus.Println(req.ProtoFile)
-	//
-	//for i := range req.ProtoFile {
-	//	for j := range req.ProtoFile[i].Service {
-	//		fmt.Println(req.ProtoFile[i].Service[j].Name)
-	//	}
-	//}
 
 	return
 	protoFiles, err := findProtoFilesInPath(protoFilesPathSource)

@@ -98,7 +98,7 @@ func getMethodsMap(in map[string]protoService) map[string]interface{} {
 }
 
 func main() {
-	logrus.Errorf("hello from interceptor")
+	logrus.Errorf("hello from interceptor updated")
 
 	//input, _ := ioutil.ReadAll(os.Stdin)
 	//var req pluginpb.CodeGeneratorRequest

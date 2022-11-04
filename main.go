@@ -116,10 +116,7 @@ func main() {
 
 	logrus.Println("success parsing")
 	logrus.Println(req.FileToGenerate)
-
-	for i := range req.ProtoFile {
-		fmt.Println(req.ProtoFile[i].Service)
-	}
+	logrus.Println(req.ProtoFile)
 
 	for i := range req.ProtoFile {
 		for j := range req.ProtoFile[i].Service {

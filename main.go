@@ -109,11 +109,12 @@ func main() {
 	}
 
 	req := &pluginpb.CodeGeneratorRequest{}
-	if err := proto.Unmarshal(in, req); err != nil {
+	if err = proto.Unmarshal(in, req); err != nil {
 		logrus.Errorf("%v", err)
 		return
 	}
 
+	logrus.Println("success parsing")
 	logrus.Println(req.FileToGenerate)
 
 	for i := range req.ProtoFile {
@@ -126,10 +127,6 @@ func main() {
 		}
 	}
 
-	//input, _ := ioutil.ReadAll(os.Stdin)
-	//var req pluginpb.CodeGeneratorRequest
-	//proto.Unmarshal(file, &req)
-	//
 	return
 	protoFiles, err := findProtoFilesInPath(protoFilesPathSource)
 	if err != nil {

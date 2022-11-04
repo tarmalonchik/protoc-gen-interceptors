@@ -99,8 +99,6 @@ func getMethodsMap(in map[string]protoService) map[string]interface{} {
 
 func main() {
 	logrus.Errorf("started")
-	for {
-	}
 
 	//input, _ := ioutil.ReadAll(os.Stdin)
 	//var req pluginpb.CodeGeneratorRequest

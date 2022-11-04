@@ -116,13 +116,13 @@ func main() {
 
 	logrus.Println("success parsing")
 	logrus.Println(req.FileToGenerate)
-	logrus.Println(req.ProtoFile)
-
-	for i := range req.ProtoFile {
-		for j := range req.ProtoFile[i].Service {
-			fmt.Println(req.ProtoFile[i].Service[j].Name)
-		}
-	}
+	//logrus.Println(req.ProtoFile)
+	//
+	//for i := range req.ProtoFile {
+	//	for j := range req.ProtoFile[i].Service {
+	//		fmt.Println(req.ProtoFile[i].Service[j].Name)
+	//	}
+	//}
 
 	return
 	protoFiles, err := findProtoFilesInPath(protoFilesPathSource)

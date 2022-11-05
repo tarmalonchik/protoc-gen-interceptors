@@ -7,20 +7,18 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
-	"io"
-	"io/ioutil"
 	"os"
-	"regexp"
 	"strings"
 
 	"github.com/sirupsen/logrus"
 	"golang.org/x/tools/go/ast/astutil"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/descriptorpb"
+	"google.golang.org/protobuf/types/pluginpb"
 )
 
 const (
-	protoFilesPathSource = "api/proto/"
-	generatedFiledPath   = "pkg/api/sdk/"
-	protoExtension       = "proto"
+	protoExtension = ".proto"
 
 	generatedFileTemplate     = "%s.pb.gw.go"
 	rootFunctionTemplate      = "Register%sHandlerServer"
@@ -78,7 +76,12 @@ type assignmentWithRPCMethodName struct {
 type protoService struct {
 	serviceName          string
 	registerFunctionName string
-	methods              []string
+	methods              []*descriptorpb.MethodDescriptorProto
+}
+
+type protoFile struct {
+	filename string
+	services []*descriptorpb.ServiceDescriptorProto
 }
 
 func (p *protoService) getMethodFunctionsMap() map[string]interface{} {
@@ -93,62 +96,71 @@ func getMethodsMap(in map[string]protoService) map[string]interface{} {
 	resp := make(map[string]interface{})
 	for i := range in {
 		for j := range in[i].methods {
-			resp[fmt.Sprintf(methodFunctionTemplate, in[i].serviceName, in[i].methods[j])] = nil
+			resp[fmt.Sprintf(methodFunctionTemplate, in[i].serviceName, in[i].methods[j].GetName())] = nil
 		}
 	}
 	return resp
 }
 
+func stringToMap(in []string) map[string]interface{} {
+	resp := make(map[string]interface{})
+	for i := range in {
+		resp[in[i]] = nil
+	}
+	return resp
+}
+
+func resolveProtoFilesFromCodeGeneratorRequest(req *pluginpb.CodeGeneratorRequest) (resp []protoFile) {
+	protoFilesMap := stringToMap(req.FileToGenerate)
+	protoFilesParsed := req.GetProtoFile()
+	for _, file := range protoFilesParsed {
+		if len(file.GetService()) == 0 {
+			continue
+		}
+		if _, ok := protoFilesMap[file.GetName()]; ok {
+			resp = append(resp, protoFile{
+				filename: file.GetName(),
+				services: file.GetService(),
+			})
+		}
+	}
+	return resp
+}
+
+func resolveOutDir(in string) string {
+	items := strings.Split(in, "=")
+	if len(items) == 2 {
+		return items[1]
+	}
+	return ""
+}
+
 func main() {
-	in, err := io.ReadAll(os.Stdin)
-	if err != nil {
+	data, err := os.ReadFile("some")
+
+	req := &pluginpb.CodeGeneratorRequest{}
+	if err = proto.Unmarshal(data, req); err != nil {
 		logrus.Errorf("%v", err)
 		return
 	}
-	logrus.Errorf("%d", len(in))
+	outDir := resolveOutDir(req.GetParameter())
 
-	os.WriteFile("some", in, 0664)
+	protoFileList := resolveProtoFilesFromCodeGeneratorRequest(req)
 
-	//req := &pluginpb.CodeGeneratorRequest{}
-	//if err = proto.Unmarshal(in, req); err != nil {
-	//	logrus.Errorf("%v", err)
-	//	return
-	//}
-	//
-	//for i := range req.GetProtoFile() {
-	//	fmt.Println(req.GetProtoFile()[i].Name)
-	//}
+	for i := range protoFileList {
+		rootFunctions := getRootFunctionsNames(protoFileList[i])
 
-	logrus.Errorf("success")
-
-	return
-	protoFiles, err := findProtoFilesInPath(protoFilesPathSource)
-	if err != nil {
-		logrus.Errorf("error getting proto files in path: %v", err)
-		return
-	}
-
-	for i := range protoFiles {
-		protoServices, err := getProtoServicesFromFile(protoFilesPathSource + protoFiles[i] + "." + protoExtension)
-		if err != nil {
-			logrus.Errorf("error getting proto services by filename: %v", err)
-			return
-		} else if len(protoServices) == 0 {
-			continue
-		}
-
-		if protoFiles[i] == "chatops" {
-			for j := range protoServices {
-				fmt.Println(protoServices[j].methods)
-			}
-		}
-
-		rootFunctions := getRootFunctionsNames(protoServices)
 		currentFileMethods := getMethodsMap(rootFunctions)
 
 		fSet := token.NewFileSet()
+		generatedFileName := fmt.Sprintf("%s/%s", outDir, fmt.Sprintf(generatedFileTemplate, resolveProtoFileName(protoFileList[i].filename)))
 
-		file, err := parser.ParseFile(fSet, generatedFiledPath+fmt.Sprintf(generatedFileTemplate, protoFiles[i]), nil, parser.ParseComments)
+		fileAst, err := parser.ParseFile(
+			fSet,
+			generatedFileName,
+			nil,
+			parser.ParseComments,
+		)
 		if err != nil {
 			logrus.Errorf("error parsing go code from file: %v", err)
 			return
@@ -161,7 +173,7 @@ func main() {
 		)
 
 		astutil.Apply(
-			file,
+			fileAst,
 			nil,
 			func(cursor *astutil.Cursor) bool {
 				if funcDecl, ok := cursor.Node().(*ast.FuncDecl); ok {
@@ -178,9 +190,7 @@ func main() {
 				}
 				if assignStmt, ok := cursor.Node().(*ast.AssignStmt); ok {
 					if len(assignStmt.Rhs) == 1 {
-
 						if callExpr, ok := assignStmt.Rhs[0].(*ast.CallExpr); ok {
-
 							if selectorExpr, ok := callExpr.Fun.(*ast.SelectorExpr); ok {
 								if ident, ok := selectorExpr.X.(*ast.Ident); ok {
 									if ident.Name == runtimePackage {
@@ -194,13 +204,10 @@ func main() {
 									}
 								}
 							} else if funcIdent, ok := callExpr.Fun.(*ast.Ident); ok {
-
 								newFunctionName := fmt.Sprintf(generatedFunctionTemplate, interceptorVar, funcIdent.Name)
-
 								_, isCurrentFileMethod := currentFileMethods[funcIdent.Name]
 								_, isNewGeneratedFunc := functions[newFunctionName]
 								if isCurrentFileMethod || isNewGeneratedFunc {
-
 									cursor.Replace(generateAssignmentStatement(newFunctionName))
 									functions[newFunctionName] = assignmentWithRPCMethodName{
 										rpcMethodName: previousRPCMethodName,
@@ -217,19 +224,19 @@ func main() {
 		)
 
 		for _, val := range functions {
-			file.Decls = append(file.Decls, generateFunctionDeclaration(val, serverType))
+			fileAst.Decls = append(fileAst.Decls, generateFunctionDeclaration(val, serverType))
 		}
 
 		buf := bytes.NewBuffer(nil)
 
-		astutil.AddImport(fSet, file, fmtPackage)
+		astutil.AddImport(fSet, fileAst, fmtPackage)
 
-		if err = printer.Fprint(buf, fSet, file); err != nil {
+		if err = printer.Fprint(buf, fSet, fileAst); err != nil {
 			logrus.Errorf("error writing node to buffer: %v", err)
 			return
 		}
 
-		if err = ioutil.WriteFile(generatedFiledPath+fmt.Sprintf(generatedFileTemplate, protoFiles[i]), buf.Bytes(), 0664); err != nil {
+		if err = os.WriteFile(generatedFileName, buf.Bytes(), 0664); err != nil {
 			logrus.Errorf("error writing file: %v", err)
 			return
 		}
@@ -269,99 +276,20 @@ func resolveServerType(funcDecl *ast.FuncDecl) string {
 	return ""
 }
 
-func getProtoServicesFromFile(filePath string) ([]protoService, error) {
-	const (
-		serviceKeyWord = "service"
-		methodKeyWord  = "rpc"
-	)
-	var (
-		resp              = make([]protoService, 0)
-		nextAppendService = false
-		nextAppendMethod  = false
-	)
-
-	data, err := ioutil.ReadFile(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("error opening file: %w", err)
-	}
-
-	fields := strings.FieldsFunc(string(removeCTypeComments(data)), func(r rune) bool {
-		if r == ' ' {
-
-		}
-		switch r {
-		case ' ':
-			return true
-			//case '(':
-			//	return false
-			//case ')':
-			//	return false
-			//case ':':
-			//	return false
-		}
-		return false
-	})
-
-	for _, value := range fields {
-		if nextAppendService {
-			nextAppendService = false
-			resp = append(resp, protoService{serviceName: value})
-		} else if nextAppendMethod {
-			nextAppendMethod = false
-			resp[len(resp)-1].methods = append(resp[len(resp)-1].methods, value)
-		} else if value == serviceKeyWord {
-			nextAppendService = true
-		} else if value == methodKeyWord {
-			nextAppendMethod = true
-		}
-	}
-	return resp, nil
+func resolveProtoFileName(in string) string {
+	return strings.ReplaceAll(in, protoExtension, "")
 }
 
-func removeCTypeComments(in []byte) []byte {
-	re := regexp.MustCompile("(?s)//.*?\n|/\\*.*?\\*/")
-	return re.ReplaceAll(in, nil)
-}
-
-func findProtoFilesInPath(path string) ([]string, error) {
-	resp := make([]string, 0)
-
-	dirInfo, err := ioutil.ReadDir(path)
-	if err != nil {
-		return nil, err
-	}
-
-	for i := range dirInfo {
-		if fileName, err := resolveProtoFileName(dirInfo[i].Name()); err != nil {
-			continue
-		} else {
-			resp = append(resp, fileName)
-		}
-	}
-	return resp, nil
-}
-
-func resolveProtoFileName(in string) (string, error) {
-	items := strings.Split(in, ".")
-	if len(items) < 2 {
-		return "", fmt.Errorf("file have no extension")
-	}
-	if items[len(items)-1] == protoExtension {
-		return strings.Join(items[:len(items)-1], "."), nil
-	}
-	return "", fmt.Errorf("file have no %s extension", protoExtension)
-}
-
-func getRootFunctionsNames(input []protoService) map[string]protoService {
+func getRootFunctionsNames(input protoFile) map[string]protoService {
 	resp := make(map[string]protoService)
 
-	for i := range input {
+	for i := range input.services {
 		service := protoService{
-			serviceName:          input[i].serviceName,
-			registerFunctionName: fmt.Sprintf(rootFunctionTemplate, input[i].serviceName),
-			methods:              input[i].methods,
+			serviceName:          input.services[i].GetName(),
+			registerFunctionName: fmt.Sprintf(rootFunctionTemplate, input.services[i].GetName()),
+			methods:              input.services[i].GetMethod(),
 		}
-		resp[fmt.Sprintf(rootFunctionTemplate, input[i].serviceName)] = service
+		resp[fmt.Sprintf(rootFunctionTemplate, input.services[i].GetName())] = service
 	}
 	return resp
 }

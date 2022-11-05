@@ -107,12 +107,7 @@ func main() {
 	}
 	logrus.Errorf("%d", len(in))
 
-	in2, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		logrus.Errorf("%v", err)
-		return
-	}
-	logrus.Errorf("%d", len(in2))
+	os.WriteFile("some", in, 0664)
 
 	//req := &pluginpb.CodeGeneratorRequest{}
 	//if err = proto.Unmarshal(in, req); err != nil {

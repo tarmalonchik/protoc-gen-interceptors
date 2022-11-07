@@ -1,4 +1,4 @@
-module github.com/Alan-prog/protoc-gen-interceptors
+module github.com/tarmalonchik/protoc-gen-interceptors
 
 go 1.19
 

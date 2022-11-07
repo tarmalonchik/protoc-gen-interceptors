@@ -148,7 +148,6 @@ func main() {
 		logrus.Errorf("unmarshal error %v", err)
 		return
 	}
-
 	outDir := resolveOutDir(req.GetParameter())
 
 	protoFileList := resolveProtoFilesFromCodeGeneratorRequest(req)
@@ -378,6 +377,11 @@ func generateField(pointer bool, packageName, selectorName string, names ...stri
 
 func generateFunctionDeclaration(funcData assignmentWithRPCMethodName, serverType string) *ast.FuncDecl {
 	return &ast.FuncDecl{
+		Doc: &ast.CommentGroup{
+			List: []*ast.Comment{
+				{},
+			},
+		},
 		Type: &ast.FuncType{
 			Params: &ast.FieldList{
 				List: []*ast.Field{

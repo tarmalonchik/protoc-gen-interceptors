@@ -149,11 +149,7 @@ func main() {
 		return
 	}
 
-	logrus.Errorf(req.GetParameter())
-
 	outDir := resolveOutDir(req.GetParameter())
-
-	logrus.Errorf(outDir)
 
 	protoFileList := resolveProtoFilesFromCodeGeneratorRequest(req)
 

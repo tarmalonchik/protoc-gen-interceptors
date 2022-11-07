@@ -148,7 +148,12 @@ func main() {
 		logrus.Errorf("unmarshal error %v", err)
 		return
 	}
+
+	logrus.Errorf(req.GetParameter())
+
 	outDir := resolveOutDir(req.GetParameter())
+
+	logrus.Errorf(outDir)
 
 	protoFileList := resolveProtoFilesFromCodeGeneratorRequest(req)
 

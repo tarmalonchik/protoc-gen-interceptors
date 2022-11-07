@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"io"
 	"os"
 	"strings"
 
@@ -136,11 +137,15 @@ func resolveOutDir(in string) string {
 }
 
 func main() {
-	data, err := os.ReadFile("some")
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		logrus.Errorf("reading stdin error: %v", err)
+		return
+	}
 
 	req := &pluginpb.CodeGeneratorRequest{}
 	if err = proto.Unmarshal(data, req); err != nil {
-		logrus.Errorf("%v", err)
+		logrus.Errorf("unmarshal error %v", err)
 		return
 	}
 	outDir := resolveOutDir(req.GetParameter())

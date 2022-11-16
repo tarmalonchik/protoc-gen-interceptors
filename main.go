@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"go/ast"
+	"go/format"
 	"go/parser"
 	"go/printer"
 	"go/token"
@@ -53,7 +54,6 @@ const (
 	annotatedContextVar    = "annotatedContext"
 	inboundMarshalerVar    = "inboundMarshaler"
 	nilVar                 = "nil"
-	anyVar                 = "any"
 	serverVar              = "server"
 	pathParamsVar          = "pathParams"
 
@@ -83,14 +83,6 @@ type protoService struct {
 type protoFile struct {
 	filename string
 	services []*descriptorpb.ServiceDescriptorProto
-}
-
-func (p *protoService) getMethodFunctionsMap() map[string]interface{} {
-	resp := make(map[string]interface{})
-	for i := range p.methods {
-		resp[fmt.Sprintf(methodFunctionTemplate, p.serviceName, p.methods[i])] = nil
-	}
-	return resp
 }
 
 func getMethodsMap(in map[string]protoService) map[string]interface{} {
@@ -153,100 +145,132 @@ func main() {
 	protoFileList := resolveProtoFilesFromCodeGeneratorRequest(req)
 
 	for i := range protoFileList {
-		rootFunctions := getRootFunctionsNames(protoFileList[i])
-
-		currentFileMethods := getMethodsMap(rootFunctions)
-
-		fSet := token.NewFileSet()
-		generatedFileName := fmt.Sprintf("%s/%s", outDir, fmt.Sprintf(generatedFileTemplate, resolveProtoFileName(protoFileList[i].filename)))
-
-		fileAst, err := parser.ParseFile(
-			fSet,
-			generatedFileName,
-			nil,
-			parser.ParseComments,
-		)
-		if err != nil {
-			logrus.Errorf("error parsing go code from file: %v", err)
-			return
-		}
-
-		var (
-			previousRPCMethodName string
-			serverType            string
-			functions             = make(map[string]assignmentWithRPCMethodName)
-		)
-
-		astutil.Apply(
-			fileAst,
-			nil,
-			func(cursor *astutil.Cursor) bool {
-				if funcDecl, ok := cursor.Node().(*ast.FuncDecl); ok {
-					if funcDecl.Name != nil {
-						if _, ok = rootFunctions[funcDecl.Name.Name]; ok {
-							serverType = resolveServerType(funcDecl)
-							if ok = checkIfFuncNeedField(funcDecl, interceptorVar); ok {
-								funcDecl.Type.Params.List = append(funcDecl.Type.Params.List, interceptorField)
-							}
-						} else if _, ok = functions[funcDecl.Name.Name]; ok {
-							cursor.Delete()
-						}
-					}
-				}
-				if assignStmt, ok := cursor.Node().(*ast.AssignStmt); ok {
-					if len(assignStmt.Rhs) == 1 {
-						if callExpr, ok := assignStmt.Rhs[0].(*ast.CallExpr); ok {
-							if selectorExpr, ok := callExpr.Fun.(*ast.SelectorExpr); ok {
-								if ident, ok := selectorExpr.X.(*ast.Ident); ok {
-									if ident.Name == runtimePackage {
-										if selectorExpr.Sel != nil && selectorExpr.Sel.Name == annotateIncomingContextSelector {
-											for _, annotateArgs := range callExpr.Args {
-												if basicLit, ok := annotateArgs.(*ast.BasicLit); ok {
-													previousRPCMethodName = basicLit.Value
-												}
-											}
-										}
-									}
-								}
-							} else if funcIdent, ok := callExpr.Fun.(*ast.Ident); ok {
-								newFunctionName := fmt.Sprintf(generatedFunctionTemplate, interceptorVar, funcIdent.Name)
-								_, isCurrentFileMethod := currentFileMethods[funcIdent.Name]
-								_, isNewGeneratedFunc := functions[newFunctionName]
-								if isCurrentFileMethod || isNewGeneratedFunc {
-									cursor.Replace(generateAssignmentStatement(newFunctionName))
-									functions[newFunctionName] = assignmentWithRPCMethodName{
-										rpcMethodName: previousRPCMethodName,
-										assignStmt:    assignStmt,
-										funcName:      newFunctionName,
-									}
-								}
-							}
-						}
-					}
-				}
-				return true
-			},
-		)
-
-		for _, val := range functions {
-			fileAst.Decls = append(fileAst.Decls, generateFunctionDeclaration(val, serverType))
-		}
-
-		buf := bytes.NewBuffer(nil)
-
-		astutil.AddImport(fSet, fileAst, fmtPackage)
-
-		if err = printer.Fprint(buf, fSet, fileAst); err != nil {
-			logrus.Errorf("error writing node to buffer: %v", err)
-			return
-		}
-
-		if err = os.WriteFile(generatedFileName, buf.Bytes(), 0664); err != nil {
-			logrus.Errorf("error writing file: %v", err)
-			return
-		}
+		processSingleProto(&protoFileList[i], outDir)
 	}
 	return
+}
+
+func processSingleProto(singleFile *protoFile, outDir string) {
+	var (
+		lastRPCMethodName string
+		serverType        string
+		functions         = make(map[string]assignmentWithRPCMethodName)
+	)
+
+	if singleFile == nil {
+		return
+	}
+
+	rootFunctions := getRootFunctionsNames(*singleFile)
+
+	currentFileMethods := getMethodsMap(rootFunctions)
+
+	fSet := token.NewFileSet()
+	generatedFileName := fmt.Sprintf("%s/%s", outDir, fmt.Sprintf(generatedFileTemplate, resolveProtoFileName(singleFile.filename)))
+
+	fileAst, err := parser.ParseFile(
+		fSet,
+		generatedFileName,
+		nil,
+		parser.ParseComments,
+	)
+	if err != nil {
+		logrus.Errorf("error parsing go code from file: %v", err)
+		return
+	}
+
+	astutil.Apply(
+		fileAst,
+		nil,
+		func(cursor *astutil.Cursor) bool {
+			if funcDecl, ok := cursor.Node().(*ast.FuncDecl); ok {
+				if funcDecl.Name != nil {
+					// checking if the function is root
+					if _, ok = rootFunctions[funcDecl.Name.Name]; ok {
+						serverType = resolveServerType(funcDecl)
+						if ok = checkIfFuncNeedField(funcDecl, interceptorVar); ok {
+							// adding new field to root function
+							funcDecl.Type.Params.List = append(funcDecl.Type.Params.List, getInterceptorField())
+						}
+					} else if _, ok = functions[funcDecl.Name.Name]; ok {
+						// we need to delete old functions generated by this package to add them again later
+						cursor.Delete()
+					}
+				}
+			}
+			if assignStmt, ok := cursor.Node().(*ast.AssignStmt); ok {
+				if len(assignStmt.Rhs) == 1 {
+					if callExpr, ok := assignStmt.Rhs[0].(*ast.CallExpr); ok {
+						if selectorExpr, ok := callExpr.Fun.(*ast.SelectorExpr); ok {
+							// we need if when generating functions added to the end of file
+							tryToExtractRPCMethodName(&lastRPCMethodName, selectorExpr, callExpr)
+						} else if funcIdent, ok := callExpr.Fun.(*ast.Ident); ok {
+							newFunctionName := fmt.Sprintf(generatedFunctionTemplate, interceptorVar, funcIdent.Name)
+							// should replace old function call with new one which will be generated at the end of file
+							_, isCurrentFileMethod := currentFileMethods[funcIdent.Name]
+							_, isNewGeneratedFunc := functions[newFunctionName]
+							if isCurrentFileMethod || isNewGeneratedFunc {
+								cursor.Replace(generateAssignmentStatement(newFunctionName))
+								functions[newFunctionName] = assignmentWithRPCMethodName{
+									rpcMethodName: lastRPCMethodName,
+									assignStmt:    assignStmt,
+									funcName:      newFunctionName,
+								}
+							}
+						}
+					}
+				}
+			}
+			return true
+		},
+	)
+
+	// adding functions to the end of the generated files
+	for _, val := range functions {
+		fileAst.Decls = append(fileAst.Decls, generateFunctionDeclaration(val, serverType))
+	}
+
+	buf := bytes.NewBuffer(nil)
+
+	astutil.AddImport(fSet, fileAst, fmtPackage)
+
+	if err = printer.Fprint(buf, fSet, fileAst); err != nil {
+		logrus.Errorf("error writing node to buffer: %v", err)
+		return
+	}
+
+	formatted, err := format.Source(buf.Bytes())
+	if err != nil {
+		logrus.Errorf("error formatting generated code: %v", err)
+		return
+	}
+
+	if err = printer.Fprint(buf, fSet, fileAst); err != nil {
+		logrus.Errorf("error formatting: %v", err)
+		return
+	}
+
+	if err = os.WriteFile(generatedFileName, formatted, 0664); err != nil { // nolint
+		logrus.Errorf("error writing file: %v", err)
+		return
+	}
+}
+
+func tryToExtractRPCMethodName(rpcMethodName *string, selectorExpr *ast.SelectorExpr, callExpr *ast.CallExpr) {
+	if rpcMethodName == nil || selectorExpr == nil || callExpr == nil {
+		return
+	}
+	if ident, ok := selectorExpr.X.(*ast.Ident); ok {
+		if ident.Name == runtimePackage {
+			if selectorExpr.Sel != nil && selectorExpr.Sel.Name == annotateIncomingContextSelector {
+				for _, annotateArgs := range callExpr.Args {
+					if basicLit, ok := annotateArgs.(*ast.BasicLit); ok {
+						*rpcMethodName = basicLit.Value
+					}
+				}
+			}
+		}
+	}
 }
 
 func checkIfFuncNeedField(funcDecl *ast.FuncDecl, fieldName string) bool {
@@ -318,363 +342,374 @@ func genIdentWithObj(in string, kind ast.ObjKind) *ast.Ident {
 func generateAssignmentStatement(funcName string) *ast.AssignStmt {
 	return &ast.AssignStmt{
 		Tok: token.DEFINE,
-		Lhs: []ast.Expr{
-			genIdent(mdVar),
-			genIdent(respVar),
-			genIdent(errVar),
-		},
-		Rhs: []ast.Expr{
-			&ast.CallExpr{
-				Fun: genIdent(funcName),
-				Args: []ast.Expr{
-					genIdent(ctxVar),
-					genIdent(annotatedContextVar),
-					genIdent(inboundMarshalerVar),
-					genIdent(serverVar),
-					genIdent(interceptorVar),
-					genIdent(reqVar),
-					genIdent(pathParamsVar),
-				},
-			},
-		},
+		Lhs: exprToList(genIdent(mdVar), genIdent(respVar), genIdent(errVar)),
+		Rhs: exprToList(
+			getCallExpr(
+				genIdent(funcName),
+				genIdent(ctxVar),
+				genIdent(annotatedContextVar),
+				genIdent(inboundMarshalerVar),
+				genIdent(serverVar),
+				genIdent(interceptorVar),
+				genIdent(reqVar),
+				genIdent(pathParamsVar),
+			),
+		),
 	}
 }
 
 func generateField(pointer bool, packageName, selectorName string, names ...string) *ast.Field {
 	var (
 		fieldType ast.Expr
-		name      []*ast.Ident
 	)
 
+	nameList := make([]*ast.Ident, len(names))
+
 	for i := range names {
-		name = append(name, genIdent(names[i]))
+		nameList[i] = genIdent(names[i])
 	}
 	if packageName == "" {
 		fieldType = &ast.Ident{
 			Name: selectorName,
 		}
 	} else {
-		fieldType = &ast.SelectorExpr{
-			X: &ast.Ident{
-				Name: packageName,
-			},
-			Sel: &ast.Ident{
-				Name: selectorName,
-			},
-		}
+		fieldType = getSelectorExpr(packageName, selectorName)
 	}
 	if pointer {
-		fieldType = &ast.StarExpr{
-			X: fieldType,
-		}
+		fieldType = getStarExpr(fieldType)
 	}
 
 	return &ast.Field{
-		Names: name,
+		Names: nameList,
 		Type:  fieldType,
 	}
 }
 
 func generateFunctionDeclaration(funcData assignmentWithRPCMethodName, serverType string) *ast.FuncDecl {
 	return &ast.FuncDecl{
-		Doc: &ast.CommentGroup{
-			List: []*ast.Comment{
-				{},
-			},
-		},
-		Type: &ast.FuncType{
-			Params: &ast.FieldList{
-				List: []*ast.Field{
-					generateField(false, contextPackage, contextSelector, ctxVar, annotatedContextVar),
-					generateField(false, runtimePackage, marshalerSelector, inboundMarshalerVar),
-					generateField(false, "", serverType, serverVar),
-					generateField(true, grpcPackage, unaryServerInterceptorSelector, interceptorVar),
-					generateField(true, httpPackage, requestSelector, reqVar),
-					{
-						Names: []*ast.Ident{
-							genIdentWithObj(pathParamsVar, ast.Var),
-						},
-						Type: &ast.MapType{
-							Key:   genIdent(stringType),
-							Value: genIdent(stringType),
-						},
-					},
-				},
-			},
-			Results: &ast.FieldList{
-				List: []*ast.Field{
-					generateField(false, runtimePackage, serverMetadataSelector, mdVar),
-					generateField(false, protoPackage, messageSelector, respVar),
-					generateField(false, "", errType, errVar),
-				},
-			},
-		},
-		Name: &ast.Ident{
-			Name: funcData.funcName,
-		},
-		Body: &ast.BlockStmt{
-			List: []ast.Stmt{
-				&ast.DeclStmt{
-					Decl: &ast.GenDecl{
-						Tok: token.TYPE,
-						Specs: []ast.Spec{
-							&ast.TypeSpec{
-								Name: genIdentWithObj(handlerResponseType, ast.Typ),
-								Type: &ast.StructType{
-									Fields: &ast.FieldList{
-										List: []*ast.Field{
-											generateField(false, runtimePackage, serverMetadataSelector, mdVar),
-											generateField(false, protoPackage, messageSelector, respVar),
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-				&ast.AssignStmt{
-					Tok: token.DEFINE,
-					Lhs: []ast.Expr{
-						genIdentWithObj(handlerVar, ast.Var),
-					},
-					Rhs: []ast.Expr{
-						&ast.FuncLit{
-							Type: &ast.FuncType{
-								Params: &ast.FieldList{
-									List: []*ast.Field{
-										generateField(false, contextPackage, contextSelector, ctxVar),
-										generateField(false, "", anyVar, reqVar),
-									},
-								},
-								Results: &ast.FieldList{
-									List: []*ast.Field{
-										generateField(false, "", anyVar),
-										generateField(false, "", errType),
-									},
-								},
-							},
-							Body: &ast.BlockStmt{
-								List: []ast.Stmt{
-									&ast.IfStmt{
-										Init: &ast.AssignStmt{
-											Tok: token.DEFINE,
-											Lhs: []ast.Expr{
-												genIdentWithObj(reqVar, ast.Var),
-												genIdentWithObj(okVar, ast.Var),
-											},
-											Rhs: []ast.Expr{
-												&ast.TypeAssertExpr{
-													X: genIdent(reqVar),
-													Type: &ast.StarExpr{
-														X: &ast.SelectorExpr{
-															X:   genIdent(httpPackage),
-															Sel: genIdent(requestSelector),
-														},
-													},
-												},
-											},
-										},
-										Cond: genIdent(okVar),
-										Body: &ast.BlockStmt{
-											List: []ast.Stmt{
-												funcData.assignStmt,
-												&ast.ReturnStmt{
-													Results: []ast.Expr{
-														&ast.CompositeLit{
-															Type: genIdent(handlerResponseType),
-															Elts: []ast.Expr{
-																0: &ast.KeyValueExpr{
-																	Key:   genIdent(respVar),
-																	Value: genIdent(respVar),
-																},
-																&ast.KeyValueExpr{
-																	Key:   genIdent(mdVar),
-																	Value: genIdent(mdVar),
-																},
-															},
-														},
-														genIdent(errVar),
-													},
-												},
-											},
-										},
-									},
+		Doc:  getEmptyLine(),
+		Type: generateFunctionDeclarationType(serverType),
+		Name: genIdent(funcData.funcName),
+		Body: getFunctionDeclarationBody(funcData),
+	}
+}
 
-									&ast.ReturnStmt{
-										Results: []ast.Expr{
-											genIdent(nilVar),
-											&ast.CallExpr{
-												Fun: &ast.SelectorExpr{
-													X:   genIdent(fmtPackage),
-													Sel: genIdent(errorfSelector),
-												},
-												Args: []ast.Expr{
-													&ast.BasicLit{
-														Kind:  token.STRING,
-														Value: fmt.Sprintf("\"error converting req to *%s.Request\"", httpPackage),
-													},
-												},
-											},
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-				&ast.DeclStmt{
-					Decl: &ast.GenDecl{
-						Tok: token.VAR,
-						Specs: []ast.Spec{
-							&ast.ValueSpec{
-								Names: []*ast.Ident{
-									genIdentWithObj(handlerResponseItemVar, ast.Var),
-								},
-								Type: genIdent(anyVar),
-							},
-						},
-					},
-				},
-				&ast.IfStmt{
-					Cond: &ast.BinaryExpr{
-						Op: token.EQL,
-						X:  genIdent(interceptorVar),
-						Y:  genIdent(nilVar),
-					},
-					Body: &ast.BlockStmt{
-						List: []ast.Stmt{
-							&ast.AssignStmt{
-								Tok: token.ASSIGN,
-								Lhs: []ast.Expr{
-									genIdent(handlerResponseItemVar),
-									genIdent(errVar),
-								},
-								Rhs: []ast.Expr{
-									&ast.CallExpr{
-										Fun: genIdent(handlerVar),
-										Args: []ast.Expr{
-											genIdent(ctxVar),
-											genIdent(reqVar),
-										},
-									},
-								},
-							},
-						},
-					},
-					Else: &ast.BlockStmt{
-						List: []ast.Stmt{
-							&ast.AssignStmt{
-								Lhs: []ast.Expr{
-									genIdent(handlerResponseItemVar),
-									genIdent(errVar),
-								},
-								Tok: token.ASSIGN,
-								Rhs: []ast.Expr{
-									&ast.CallExpr{
-										Fun: &ast.ParenExpr{
-											X: &ast.StarExpr{
-												X: genIdent(interceptorVar),
-											},
-										},
-										Args: []ast.Expr{
-											genIdent(ctxVar),
-											genIdent(reqVar),
-											&ast.UnaryExpr{
-												Op: token.AND,
-												X: &ast.CompositeLit{
-													Type: &ast.SelectorExpr{
-														X:   genIdent(grpcPackage),
-														Sel: genIdent(unaryServerInfoSelector),
-													},
-													Elts: []ast.Expr{
-														&ast.KeyValueExpr{
-															Key:   genIdent(serverStructField),
-															Value: genIdent(serverVar),
-														},
-														&ast.KeyValueExpr{
-															Key: genIdent(fullMethodStructField),
-															Value: &ast.BasicLit{
-																Kind:  token.STRING,
-																Value: funcData.rpcMethodName,
-															},
-														},
-													},
-												},
-											},
-											genIdent(handlerVar),
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-				&ast.IfStmt{
-					Cond: &ast.BinaryExpr{
-						Op: token.NEQ,
-						X:  genIdent(errVar),
-						Y:  genIdent(nilVar),
-					},
-					Body: &ast.BlockStmt{
-						List: []ast.Stmt{
-							&ast.ReturnStmt{
-								Results: []ast.Expr{},
-							},
-						},
-					},
-				},
-				&ast.AssignStmt{
-					Lhs: []ast.Expr{
-						genIdentWithObj(dataVar, ast.Var),
-						genIdentWithObj(okVar, ast.Var),
-					},
-					Tok: token.DEFINE,
-					Rhs: []ast.Expr{
-						&ast.TypeAssertExpr{
-							X:    genIdent(handlerResponseItemVar),
-							Type: genIdent(handlerResponseType),
-						},
-					},
-				},
-				&ast.IfStmt{
-					Cond: &ast.UnaryExpr{
-						Op: token.NOT,
-						X:  genIdent(okVar),
-					},
-					Body: &ast.BlockStmt{
-						List: []ast.Stmt{
-							&ast.ReturnStmt{},
-						},
-					},
-				},
-				&ast.ReturnStmt{
-					Results: []ast.Expr{
-						&ast.SelectorExpr{
-							X:   genIdent(dataVar),
-							Sel: genIdent(mdVar),
-						},
-						&ast.SelectorExpr{
-							X:   genIdent(dataVar),
-							Sel: genIdent(respVar),
-						},
-						genIdent(nilVar),
-					},
+func generateFunctionDeclarationType(serverType string) *ast.FuncType {
+	return &ast.FuncType{
+		Params: fieldsToList(
+			generateField(false, contextPackage, contextSelector, ctxVar, annotatedContextVar),
+			generateField(false, runtimePackage, marshalerSelector, inboundMarshalerVar),
+			generateField(false, "", serverType, serverVar),
+			generateField(true, grpcPackage, unaryServerInterceptorSelector, interceptorVar),
+			generateField(true, httpPackage, requestSelector, reqVar),
+			&ast.Field{
+				Names: identToList(genIdentWithObj(pathParamsVar, ast.Var)),
+				Type: &ast.MapType{
+					Key:   genIdent(stringType),
+					Value: genIdent(stringType),
 				},
 			},
+		),
+		Results: fieldsToList(
+			generateField(false, runtimePackage, serverMetadataSelector, mdVar),
+			generateField(false, protoPackage, messageSelector, respVar),
+			generateField(false, "", errType, errVar),
+		),
+	}
+}
+
+func getFunctionDeclarationBody(funcData assignmentWithRPCMethodName) *ast.BlockStmt {
+	return getBlockStmnt(
+		generateStructDeclaration(),
+		generateHandlerAssignment(funcData),
+		generateInterfaceDeclaration(),
+		generateIfInterceptorIsZeroStmt(funcData),
+		getIfStmt(
+			getBinaryExpr(token.NEQ, errVar, nilVar),
+			nil,
+			nil,
+			stmtToList(getReturnStmt()),
+		),
+		&ast.AssignStmt{
+			Lhs: exprToList(genIdentWithObj(dataVar, ast.Var), genIdentWithObj(okVar, ast.Var)),
+			Tok: token.DEFINE,
+			Rhs: exprToList(getTypeAssertExpr(genIdent(handlerResponseItemVar), genIdent(handlerResponseType))),
+		},
+		getIfStmt(getUnaryExpr(token.NOT, genIdent(okVar)), nil, nil, stmtToList(getReturnStmt())),
+		getReturnStmt(getSelectorExpr(dataVar, mdVar), getSelectorExpr(dataVar, respVar), genIdent(nilVar)),
+	)
+}
+
+func generateIfInterceptorIsZeroStmt(funcData assignmentWithRPCMethodName) *ast.IfStmt {
+	return getIfStmt(
+		getBinaryExpr(token.EQL, interceptorVar, nilVar),
+		nil,
+		stmtToList(
+			&ast.AssignStmt{
+				Lhs: exprToList(genIdent(handlerResponseItemVar), genIdent(errVar)),
+				Tok: token.ASSIGN,
+				Rhs: exprToList(
+					getCallExpr(
+						getParenExpr(getStarExpr(genIdent(interceptorVar))),
+						genIdent(ctxVar),
+						genIdent(reqVar),
+						getUnaryExpr(token.AND, getCompositeLit(
+							getSelectorExpr(grpcPackage, unaryServerInfoSelector),
+							getKeyValExpr(genIdent(serverStructField), genIdent(serverVar)),
+							getKeyValExpr(genIdent(fullMethodStructField), getBasicLit(token.STRING, funcData.rpcMethodName)))),
+						genIdent(handlerVar),
+					),
+				),
+			},
+		),
+		stmtToList(
+			&ast.AssignStmt{
+				Tok: token.ASSIGN,
+				Lhs: exprToList(genIdent(handlerResponseItemVar), genIdent(errVar)),
+				Rhs: exprToList(
+					getCallExpr(
+						genIdent(handlerVar),
+						genIdent(ctxVar),
+						genIdent(reqVar),
+					)),
+			},
+		),
+	)
+}
+
+func generateHandlerAssignment(funcData assignmentWithRPCMethodName) *ast.AssignStmt {
+	return &ast.AssignStmt{
+		Tok: token.DEFINE,
+		Lhs: exprToList(genIdentWithObj(handlerVar, ast.Var)),
+		Rhs: exprToList(
+			&ast.FuncLit{
+				Type: &ast.FuncType{
+					Params: fieldsToList(
+						generateField(false, contextPackage, contextSelector, ctxVar),
+						getEmptyInterface(reqVar),
+					),
+					Results: fieldsToList(
+						getEmptyInterface(""),
+						generateField(false, "", errType),
+					),
+				},
+				Body: getBlockStmnt(
+					getIfStmt(
+						genIdent(okVar),
+						&ast.AssignStmt{
+							Tok: token.DEFINE,
+							Lhs: exprToList(genIdentWithObj(reqVar, ast.Var), genIdentWithObj(okVar, ast.Var)),
+							Rhs: exprToList(
+								getTypeAssertExpr(genIdent(reqVar), getStarExpr(getSelectorExpr(httpPackage, requestSelector))),
+							),
+						},
+						nil,
+						stmtToList(
+							funcData.assignStmt,
+							getReturnStmt(
+								getCompositeLit(
+									genIdent(handlerResponseType),
+									getKeyValExpr(genIdent(respVar),
+										genIdent(respVar)),
+									getKeyValExpr(genIdent(mdVar),
+										genIdent(mdVar)),
+								),
+								genIdent(errVar),
+							),
+						),
+					),
+					getReturnStmt(
+						genIdent(nilVar),
+						getCallExpr(
+							getSelectorExpr(fmtPackage, errorfSelector),
+							exprToList(
+								getBasicLit(
+									token.STRING,
+									fmt.Sprintf("\"error converting req to *%s.Request\"", httpPackage),
+								),
+							)...,
+						),
+					),
+				),
+			}),
+	}
+}
+
+func generateStructDeclaration() *ast.DeclStmt {
+	return getDeclStmt(
+		token.TYPE,
+		&ast.TypeSpec{
+			Name: genIdentWithObj(handlerResponseType, ast.Typ),
+			Type: getStructType(
+				generateField(false, runtimePackage, serverMetadataSelector, mdVar),
+				generateField(false, protoPackage, messageSelector, respVar),
+			),
+		},
+	)
+}
+
+func generateInterfaceDeclaration() *ast.DeclStmt {
+	return getDeclStmt(
+		token.VAR,
+		&ast.ValueSpec{
+			Names: identToList(genIdentWithObj(handlerResponseItemVar, ast.Var)),
+			Type: &ast.InterfaceType{
+				Methods: fieldsToList(),
+			},
+		},
+	)
+}
+
+func getDeclStmt(token token.Token, specs ...ast.Spec) *ast.DeclStmt {
+	return &ast.DeclStmt{
+		Decl: &ast.GenDecl{
+			Tok:   token,
+			Specs: specs,
 		},
 	}
 }
 
-var (
-	interceptorField = &ast.Field{
-		Names: []*ast.Ident{
-			genIdentWithObj(interceptorVar, ast.Var),
-		},
-		Type: &ast.StarExpr{
-			X: &ast.SelectorExpr{
-				X:   genIdent(grpcPackage),
-				Sel: genIdent(unaryServerInterceptorSelector),
-			},
+func getBinaryExpr(op token.Token, x, y string) *ast.BinaryExpr {
+	return &ast.BinaryExpr{
+		Op: op,
+		X:  genIdent(x),
+		Y:  genIdent(y),
+	}
+}
+
+func getIfStmt(cond ast.Expr, init ast.Stmt, elseItem []ast.Stmt, body []ast.Stmt) *ast.IfStmt {
+	var elseBlock ast.Stmt
+	if len(elseItem) != 0 {
+		elseBlock = getBlockStmnt(elseItem...)
+	}
+	return &ast.IfStmt{
+		Cond: cond,
+		Init: init,
+		Body: getBlockStmnt(body...),
+		Else: elseBlock,
+	}
+}
+
+func getBlockStmnt(in ...ast.Stmt) *ast.BlockStmt {
+	return &ast.BlockStmt{
+		List: in,
+	}
+}
+
+func getUnaryExpr(token token.Token, expr ast.Expr) *ast.UnaryExpr {
+	return &ast.UnaryExpr{
+		Op: token,
+		X:  expr,
+	}
+}
+
+func getTypeAssertExpr(x, typeOf ast.Expr) *ast.TypeAssertExpr {
+	return &ast.TypeAssertExpr{
+		X:    x,
+		Type: typeOf,
+	}
+}
+
+func getCompositeLit(typeOf ast.Expr, eltItems ...ast.Expr) *ast.CompositeLit {
+	return &ast.CompositeLit{
+		Type: typeOf,
+		Elts: eltItems,
+	}
+}
+
+func exprToList(expr ...ast.Expr) []ast.Expr {
+	return expr
+}
+
+func stmtToList(stmt ...ast.Stmt) []ast.Stmt {
+	return stmt
+}
+
+func getReturnStmt(expr ...ast.Expr) *ast.ReturnStmt {
+	if len(expr) == 0 {
+		return &ast.ReturnStmt{}
+	}
+	return &ast.ReturnStmt{
+		Results: expr,
+	}
+}
+
+func getSelectorExpr(x, sel string) *ast.SelectorExpr {
+	return &ast.SelectorExpr{
+		X:   genIdent(x),
+		Sel: genIdent(sel),
+	}
+}
+
+func getInterceptorField() *ast.Field {
+	return &ast.Field{
+		Names: identToList(genIdentWithObj(interceptorVar, ast.Var)),
+		Type:  getStarExpr(getSelectorExpr(grpcPackage, unaryServerInterceptorSelector)),
+	}
+}
+
+func getStarExpr(in ast.Expr) *ast.StarExpr {
+	return &ast.StarExpr{
+		X: in,
+	}
+}
+
+func getBasicLit(token token.Token, value string) *ast.BasicLit {
+	return &ast.BasicLit{
+		Kind:  token,
+		Value: value,
+	}
+}
+
+func getKeyValExpr(key, val ast.Expr) *ast.KeyValueExpr {
+	return &ast.KeyValueExpr{
+		Key:   key,
+		Value: val,
+	}
+}
+
+func fieldsToList(fields ...*ast.Field) *ast.FieldList {
+	return &ast.FieldList{
+		List: fields,
+	}
+}
+
+func getParenExpr(expr ast.Expr) *ast.ParenExpr {
+	return &ast.ParenExpr{
+		X: expr,
+	}
+}
+
+func getCallExpr(fun ast.Expr, args ...ast.Expr) *ast.CallExpr {
+	return &ast.CallExpr{
+		Fun:  fun,
+		Args: args,
+	}
+}
+
+func getStructType(fields ...*ast.Field) *ast.StructType {
+	return &ast.StructType{
+		Fields: fieldsToList(fields...),
+	}
+}
+
+func getEmptyLine() *ast.CommentGroup {
+	return &ast.CommentGroup{
+		List: []*ast.Comment{
+			{},
 		},
 	}
-)
+}
+
+func getEmptyInterface(name string) *ast.Field {
+	return &ast.Field{
+		Names: identToList(genIdent(name)),
+		Type: &ast.InterfaceType{
+			Methods: fieldsToList(),
+		},
+	}
+}
+
+func identToList(idents ...*ast.Ident) []*ast.Ident {
+	return idents
+}

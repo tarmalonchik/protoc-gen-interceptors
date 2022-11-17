@@ -1,0 +1,14 @@
+syntax = "proto3";
+package example;
+option go_package = "github.com/protoc-get-interceptors/example";
+
+import "google/protobuf/empty.proto";
+import "google/api/annotations.proto";
+
+service AuthService {
+  rpc Auth (google.protobuf.Empty) returns (google.protobuf.Empty) {
+    option (google.api.http) = {
+      get: "/v1/example"
+    };
+  }
+}

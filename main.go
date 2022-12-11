@@ -147,7 +147,6 @@ func main() {
 	for i := range protoFileList {
 		processSingleProto(&protoFileList[i], outDir)
 	}
-	return
 }
 
 func processSingleProto(singleFile *protoFile, outDir string) {

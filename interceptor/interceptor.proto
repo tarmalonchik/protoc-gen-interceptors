@@ -1,8 +1,0 @@
-syntax = "proto3";
-
-package interceptor;
-
-import "google/protobuf/descriptor.proto";
-
-option go_package = "github.com/tarmalonchik/protoc-gen-gotag/interceptor;interceptor";
-
